@@ -95,9 +95,17 @@ function Login() {
           Login
         </button>
 
-        <p>Email: {email}</p>
-        <p>Password: {password}</p>
         <p className="mt-4 text-center">
+  Don't have an account?{" "}
+  <span
+    onClick={() => navigate("/register")}
+    className="text-blue-600 cursor-pointer"
+  >
+    Register
+  </span>
+</p>
+
+<p className="mt-4 text-center">
   <span
     onClick={() => navigate("/forgot-password")}
     className="text-blue-600 cursor-pointer"

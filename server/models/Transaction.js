@@ -29,6 +29,7 @@ const transactionSchema = new mongoose.Schema(
     category: {
       type: String,
       required: true,
+      trim: true,
     },
 
     date: {
@@ -39,11 +40,15 @@ const transactionSchema = new mongoose.Schema(
     note: {
       type: String,
       default: "",
+      trim: true,
     },
   },
   {
-    timestamps: true,
-  }
+  timestamps: true,
+  indexes: [
+    { user: 1, date: -1 },
+  ],
+}
 );
 
 module.exports = mongoose.model("Transaction", transactionSchema);

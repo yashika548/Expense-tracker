@@ -1,82 +1,149 @@
 const User = require("../models/User");
-const cloudinary = require("../config/cloudinary");
-const streamifier = require("streamifier");
+const uploadToCloudinary = require("../utils/uploadToCloudinary");
 
-const uploadProfile = async (req, res) => {
+const uploadProfileImage = async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
         success: false,
-        message: "Please select an image",
+        message: "Profile image is required",
       });
     }
 
-    const streamUpload = () => {
-      return new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          {
-            folder: "expense-tracker-profile",
-          },
-          (error, result) => {
-            if (result) {
-              resolve(result);
-            } else {
-              reject(error);
-            }
-          }
-        );
+    const oldUser = await User.findById(req.user.id).select(
+      "profileImagePublicId"
+    );
 
-        streamifier.createReadStream(req.file.buffer).pipe(stream);
+    if (!oldUser) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
       });
-    };
+    }
 
-    const result = await streamUpload();
+    // Upload new image first
+    const result = await uploadToCloudinary(
+      req.file.buffer,
+      "expense-tracker/profiles"
+    );
 
-    const updatedUser = await User.findByIdAndUpdate(
+    // Update database
+    const user = await User.findByIdAndUpdate(
       req.user.id,
       {
-        profilePic: result.secure_url,
+        profileImage: result.secure_url,
+        profileImagePublicId: result.public_id,
       },
       {
-        returnDocument: "after",
+        new: true,
+        runValidators: true,
       }
-    );
+    ).select("-password -otp -otpExpire -otpVerified");
+
+    // Delete old Cloudinary image after successful update
+    if (oldUser.profileImagePublicId) {
+      try {
+        const cloudinary = require("../config/cloudinary");
+
+        await cloudinary.uploader.destroy(
+          oldUser.profileImagePublicId
+        );
+      } catch (deleteError) {
+        console.error(
+          "Old profile image deletion failed:",
+          deleteError.message
+        );
+      }
+    }
 
     res.status(200).json({
       success: true,
-      message: "Profile Uploaded Successfully",
-      user: updatedUser,
+      message: "Profile image uploaded successfully",
+      user,
     });
-
   } catch (error) {
-    console.log(error);
+    console.error("Profile image upload error:", error);
 
     res.status(500).json({
       success: false,
-      message: "Server Error",
+      message: "Failed to upload profile image",
     });
   }
 };
 
 const getProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select("-password");
+    const user = await User.findById(req.user.id).select(
+      "-password -otp -otpExpire -otpVerified"
+    );
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
 
     res.status(200).json({
       success: true,
       user,
     });
   } catch (error) {
-    console.log(error);
+    console.error("Get profile error:", error);
 
     res.status(500).json({
       success: false,
-      message: "Server Error",
+      message: "Server error",
+    });
+  }
+};
+
+const updateBudget = async (req, res) => {
+  try {
+    const budget = Number(req.body.budget);
+
+    if (!Number.isFinite(budget) || budget < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Budget must be a valid non-negative number",
+      });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      {
+        budget,
+      },
+      {
+        new: true,
+        runValidators: true,
+      }
+    ).select("-password -otp -otpExpire -otpVerified");
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Budget updated successfully",
+      budget: user.budget,
+    });
+  } catch (error) {
+    console.error("Update budget error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update budget",
     });
   }
 };
 
 module.exports = {
-  uploadProfile,
+  uploadProfileImage,
   getProfile,
+  updateBudget,
 };

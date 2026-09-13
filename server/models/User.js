@@ -22,11 +22,28 @@ const userSchema = new mongoose.Schema(
       minlength: 6,
     },
 
+    budget: {
+  type: Number,
+  default: 0,
+  min: 0,
+},
+
     profilePic: {
     type: String,
     default: "",
 },
 
+profileImage: {
+  type: String,
+  default: "",
+  trim: true,
+},
+
+profileImagePublicId: {
+  type: String,
+  default: "",
+  trim: true,
+},
 
 
     otp: {
@@ -36,12 +53,18 @@ const userSchema = new mongoose.Schema(
 otpExpire: {
     type: Date,
 },
+otpVerified: {
+  type: Boolean,
+  default: false,
+},
 
 
   },
   {
     timestamps: true,
   }
+
+  
   
 );
 

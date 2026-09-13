@@ -1,499 +1,1028 @@
-import ExpenseChart from "../components/ExpenseChart";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import api from "../services/api";
 import { saveAs } from "file-saver";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+import { toast } from "react-toastify";
+
+import api from "../services/api";
+
 import Navbar from "../components/Navbar";
 import SummaryCards from "../components/SummaryCards";
 import AddTransaction from "../components/AddTransaction";
 import TransactionList from "../components/TransactionList";
 import SearchFilter from "../components/SearchFilter";
+import ExpenseChart from "../components/ExpenseChart";
 import MonthlyChart from "../components/MonthlyChart";
-import { toast } from "react-toastify";
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
-
-
 
 function Dashboard() {
-
   const navigate = useNavigate();
 
+  // =========================
+  // STATE
+  // =========================
+
   const [transactions, setTransactions] = useState([]);
+
   const [search, setSearch] = useState("");
   const [filterCategory, setFilterCategory] = useState("All");
+
   const [income, setIncome] = useState(0);
   const [expense, setExpense] = useState(0);
   const [balance, setBalance] = useState(0);
+
   const [startDate, setStartDate] = useState("");
-const [endDate, setEndDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+
   const [editId, setEditId] = useState(null);
   const [editData, setEditData] = useState(null);
+
   const [sortBy, setSortBy] = useState("latest");
+
   const [loading, setLoading] = useState(false);
-  const [darkMode, setDarkMode] = useState(false);
-  const [currentPage, setCurrentPage] = useState(1);
-  const transactionsPerPage = 5;
+  const [actionLoading, setActionLoading] = useState(false);
 
-  const [budget, setBudget] = useState(
-  Number(localStorage.getItem("budget")) || 0
-  );
-
-
-
-
-  const editTransaction = (transaction) => {
-
-     console.log("Edit Clicked", transaction);
-  setEditId(transaction._id);
-  setEditData(transaction);
-};
-
-  const handleLogout = () => {
-    localStorage.removeItem("token");
-    navigate("/");
-  };
-
-
-  const downloadPDF = () => {
-
-  const doc = new jsPDF();
-
-  doc.setFontSize(20);
-  doc.text("Expense Tracker Report", 15, 20);
-
-  doc.setFontSize(13);
-
-  doc.text(`Income : ₹${income}`, 15, 40);
-  doc.text(`Expense : ₹${expense}`, 15, 50);
-  doc.text(`Balance : ₹${balance}`, 15, 60);
-
-  autoTable(doc, {
-    startY: 75,
-
-    head: [["Title", "Category", "Type", "Amount"]],
-
-    body: transactions.map((item) => [
-      item.title,
-      item.category,
-      item.type,
-      item.amount,
-    ]),
+  const [darkMode, setDarkMode] = useState(() => {
+    return localStorage.getItem("darkMode") === "true";
   });
 
-  doc.save("Expense_Report.pdf");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalTransactions, setTotalTransactions] = useState(0);
+
+  const [deleteId, setDeleteId] = useState(null);
+  const [deleteTitle, setDeleteTitle] = useState("");
+
+  const [budget, setBudget] = useState(0);
+
+  const transactionsPerPage = 5;
+
+  // =========================
+  // DARK MODE
+  // =========================
+
+  useEffect(() => {
+    localStorage.setItem("darkMode", darkMode);
+  }, [darkMode]);
+
+  // =========================
+  // FETCH SUMMARY
+  // =========================
+
+  const fetchSummary = async () => {
+  try {
+    const [summaryResponse, profileResponse] =
+      await Promise.all([
+        api.get("/transactions/summary"),
+        api.get("/user/profile"),
+      ]);
+
+    setIncome(summaryResponse.data.totalIncome || 0);
+    setExpense(summaryResponse.data.totalExpense || 0);
+    setBalance(summaryResponse.data.balance || 0);
+
+    setBudget(profileResponse.data.user?.budget || 0);
+  } catch (error) {
+    console.error("Fetch dashboard data error:", error);
+  }
 };
 
-  const fetchTransactions = async () => {
+  // =========================
+  // FETCH TRANSACTIONS
+  // =========================
+
+  const fetchTransactions = async (page = 1) => {
     try {
       setLoading(true);
 
-      const token = localStorage.getItem("token");
-
-      console.log("Token:", token);
-
       const response = await api.get("/transactions", {
-        headers: {
-          Authorization: `Bearer ${token}`,
+        params: {
+          page,
+          limit: transactionsPerPage,
+          search: search.trim(),
+          category: filterCategory,
         },
       });
 
-      console.log(response.data);
+      const data = response.data;
 
-      setTransactions(response.data.transactions);
-      calculateSummary(response.data.transactions);
+      setTransactions(data.transactions || []);
 
+      setCurrentPage(data.pagination?.page || 1);
+      setTotalPages(data.pagination?.totalPages || 1);
+      setTotalTransactions(data.pagination?.total || 0);
+
+      await fetchSummary();
     } catch (error) {
-      console.log(error);
-    }finally{
+      console.error("Fetch transactions error:", error);
+
+      toast.error(
+        error.response?.data?.message ||
+          "Failed to load transactions"
+      );
+    } finally {
       setLoading(false);
     }
   };
 
-  const calculateSummary = (data) => {
-
-  let totalIncome = 0;
-  let totalExpense = 0;
-
-  data.forEach((item) => {
-
-    if (item.type === "income") {
-      totalIncome += Number(item.amount);
-    } else {
-      totalExpense += Number(item.amount);
-    }
-
-  });
-
-  setIncome(totalIncome);
-  setExpense(totalExpense);
-  setBalance(totalIncome - totalExpense);
-
-};
-
+  // =========================
+  // INITIAL / SEARCH FETCH
+  // =========================
 
   useEffect(() => {
-    fetchTransactions();
-  }, []);
+    const timer = setTimeout(() => {
+      fetchTransactions(1);
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [search, filterCategory]);
+
+  // =========================
+  // LOGOUT
+  // =========================
+
+  const handleLogout = () => {
+    localStorage.removeItem("token");
+    localStorage.removeItem("user");
+
+    toast.info("Logged out successfully");
+
+    navigate("/");
+  };
+
+  // =========================
+  // ADD TRANSACTION
+  // =========================
 
   const addTransaction = async (transactionData) => {
-  try {
-    setLoading(true);
-    const token = localStorage.getItem("token");
+    try {
+      setActionLoading(true);
 
-    await api.post(
-      "/transactions",
-      transactionData,
-      {
-         headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
+      await api.post("/transactions", transactionData);
+
+      toast.success("Transaction added successfully");
+
+      await fetchTransactions(1);
+    } catch (error) {
+      console.error("Add transaction error:", error);
+
+      toast.error(
+        error.response?.data?.message ||
+          "Failed to add transaction"
+      );
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // =========================
+  // EDIT TRANSACTION
+  // =========================
+
+  const editTransaction = (transaction) => {
+    setEditId(transaction._id);
+    setEditData(transaction);
+
+    window.scrollTo({
+      top: document.body.scrollHeight / 2,
+      behavior: "smooth",
+    });
+  };
+
+  const updateTransaction = async (id, data) => {
+    try {
+      setActionLoading(true);
+
+      await api.put(`/transactions/${id}`, data);
+
+      toast.success("Transaction updated successfully");
+
+      setEditId(null);
+      setEditData(null);
+
+      await fetchTransactions(currentPage);
+    } catch (error) {
+      console.error("Update transaction error:", error);
+
+      toast.error(
+        error.response?.data?.message ||
+          "Failed to update transaction"
+      );
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // =========================
+  // DELETE CONFIRMATION
+  // =========================
+
+  const requestDelete = (id) => {
+    const transaction = transactions.find(
+      (item) => item._id === id
     );
 
-    toast.success("Transaction Added Successfully");
+    setDeleteId(id);
+    setDeleteTitle(transaction?.title || "this transaction");
+  };
 
-    
+  const cancelDelete = () => {
+    setDeleteId(null);
+    setDeleteTitle("");
+  };
 
-    // List refresh
-    fetchTransactions();
+  const confirmDelete = async () => {
+    if (!deleteId) return;
 
-  } catch (error) {
-    console.log(error);
-    toast.error("Failed to Add Transaction");
-  }finally {
-  setLoading(false);
+    try {
+      setActionLoading(true);
+
+      await api.delete(`/transactions/${deleteId}`);
+
+      toast.success("Transaction deleted successfully");
+
+      const nextPage =
+        currentPage > 1 && transactions.length === 1
+          ? currentPage - 1
+          : currentPage;
+
+      cancelDelete();
+
+      await fetchTransactions(nextPage);
+    } catch (error) {
+      console.error("Delete transaction error:", error);
+
+      toast.error(
+        error.response?.data?.message ||
+          "Failed to delete transaction"
+      );
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // =========================
+  // DATE FILTER
+  // =========================
+
+  const filteredTransactions = transactions.filter((item) => {
+    const itemDate = new Date(item.date);
+
+    const matchStartDate =
+      !startDate ||
+      itemDate >= new Date(`${startDate}T00:00:00`);
+
+    const matchEndDate =
+      !endDate ||
+      itemDate <= new Date(`${endDate}T23:59:59.999`);
+
+    return matchStartDate && matchEndDate;
+  });
+
+  // =========================
+  // SORT
+  // =========================
+
+  const sortedTransactions = [...filteredTransactions];
+
+  switch (sortBy) {
+    case "latest":
+      sortedTransactions.sort(
+        (a, b) =>
+          new Date(b.date) - new Date(a.date)
+      );
+      break;
+
+    case "oldest":
+      sortedTransactions.sort(
+        (a, b) =>
+          new Date(a.date) - new Date(b.date)
+      );
+      break;
+
+    case "high":
+      sortedTransactions.sort(
+        (a, b) =>
+          Number(b.amount) - Number(a.amount)
+      );
+      break;
+
+    case "low":
+      sortedTransactions.sort(
+        (a, b) =>
+          Number(a.amount) - Number(b.amount)
+      );
+      break;
+
+    case "az":
+      sortedTransactions.sort((a, b) =>
+        a.title.localeCompare(b.title)
+      );
+      break;
+
+    case "za":
+      sortedTransactions.sort((a, b) =>
+        b.title.localeCompare(a.title)
+      );
+      break;
+
+    default:
+      break;
   }
-};
 
-const deleteTransaction = async (id) => {
-  try {
-    setLoading(true);
-    const token = localStorage.getItem("token");
+  const currentTransactions = sortedTransactions;
 
-    await api.delete(`/transactions/${id}`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
+  // =========================
+  // CLEAR FILTERS
+  // =========================
 
-    toast.success("Transaction Deleted");
+  const clearFilters = () => {
+    setSearch("");
+    setFilterCategory("All");
+    setStartDate("");
+    setEndDate("");
+    setSortBy("latest");
 
-    fetchTransactions();
+    toast.info("Filters cleared");
+  };
 
-  } catch (error) {
-    console.log(error);
-   toast.error("Delete Failed");
+  const hasFilters =
+    search ||
+    filterCategory !== "All" ||
+    startDate ||
+    endDate ||
+    sortBy !== "latest";
 
-  }
-  finally {
-  setLoading(false);
-}
-};
+  // =========================
+  // BUDGET
+  // =========================
 
-const exportCSV = () => {
-  if (transactions.length === 0) {
-    alert("No Transactions Found");
+  const saveBudget = async () => {
+  if (budget < 0) {
+    toast.error("Budget cannot be negative");
     return;
   }
 
-  const headers = [
-    "Title",
-    "Amount",
-    "Category",
-    "Type",
-    "Date",
-  ];
+  try {
+    setActionLoading(true);
 
-  const rows = transactions.map((item) => [
-    item.title,
-    item.amount,
-    item.category,
-    item.type,
-    new Date(item.date).toLocaleDateString(),
-  ]);
+    const response = await api.put("/user/budget", {
+      budget,
+    });
 
-  const csv =
-    [headers, ...rows]
-      .map((row) => row.join(","))
+    setBudget(response.data.budget || 0);
+
+    toast.success("Budget saved successfully");
+  } catch (error) {
+    console.error("Save budget error:", error);
+
+    toast.error(
+      error.response?.data?.message ||
+        "Failed to save budget"
+    );
+  } finally {
+    setActionLoading(false);
+  }
+};
+
+  const budgetPercentage =
+    budget > 0
+      ? Math.min((expense / budget) * 100, 100)
+      : 0;
+
+  const budgetExceeded =
+    budget > 0 && expense > budget;
+
+  // =========================
+  // EXPORT CSV
+  // =========================
+
+  const exportCSV = () => {
+    if (transactions.length === 0) {
+      toast.info("No transactions found");
+      return;
+    }
+
+    const headers = [
+      "Title",
+      "Amount",
+      "Category",
+      "Type",
+      "Date",
+    ];
+
+    const rows = transactions.map((item) => [
+      item.title,
+      item.amount,
+      item.category,
+      item.type,
+      new Date(item.date).toLocaleDateString(),
+    ]);
+
+    const csv = [headers, ...rows]
+      .map((row) =>
+        row
+          .map((value) =>
+            `"${String(value).replace(/"/g, '""')}"`
+          )
+          .join(",")
+      )
       .join("\n");
 
-  const blob = new Blob([csv], {
-    type: "text/csv;charset=utf-8;",
-  });
+    const blob = new Blob([csv], {
+      type: "text/csv;charset=utf-8;",
+    });
 
-  saveAs(blob, "transactions.csv");
-};
+    saveAs(blob, "transactions.csv");
 
+    toast.success("CSV exported successfully");
+  };
 
-const updateTransaction = async (id, data) => {
-  try {
-    setLoading(true);
-    const token = localStorage.getItem("token");
+  // =========================
+  // PDF
+  // =========================
 
-    await api.put(
-      `/transactions/${id}`,
-      data,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
-      
-    );
+  const downloadPDF = () => {
+    if (transactions.length === 0) {
+      toast.info("No transactions found");
+      return;
+    }
 
-    toast.success("Transaction Updated Successfully");
+    const doc = new jsPDF();
 
-    setEditId(null);
-    setEditData(null);
+    doc.setFontSize(20);
+    doc.text("Expense Tracker Report", 15, 20);
 
-    fetchTransactions();
+    doc.setFontSize(13);
 
-  } catch (error) {
-    console.log(error);
-    toast.error("updation failed");
-  }
-  finally {
-  setLoading(false);
-}
-};
+    doc.text(`Income : ₹${income}`, 15, 40);
+    doc.text(`Expense : ₹${expense}`, 15, 50);
+    doc.text(`Balance : ₹${balance}`, 15, 60);
 
-  
-const filteredTransactions = transactions.filter((item) => {
+    autoTable(doc, {
+      startY: 75,
+      head: [
+        ["Title", "Category", "Type", "Amount"],
+      ],
+      body: transactions.map((item) => [
+        item.title,
+        item.category,
+        item.type,
+        `₹${item.amount}`,
+      ]),
+    });
 
-  const matchSearch =
-    item.title.toLowerCase().includes(search.toLowerCase());
+    doc.save("Expense_Report.pdf");
 
-  const matchCategory =
-    filterCategory === "All" ||
-    item.category === filterCategory;
+    toast.success("PDF downloaded successfully");
+  };
 
-  const itemDate = new Date(item.date);
+  // =========================
+  // LOADING SKELETON
+  // =========================
 
-  const matchDate =
-    (!startDate || itemDate >= new Date(startDate)) &&
-    (!endDate || itemDate <= new Date(endDate));
+  const LoadingSkeleton = () => (
+    <div className="grid gap-4 mt-6">
+      {[1, 2, 3].map((item) => (
+        <div
+          key={item}
+          className={`animate-pulse rounded-xl p-6 ${
+            darkMode
+              ? "bg-gray-800"
+              : "bg-white"
+          }`}
+        >
+          <div
+            className={`h-4 w-32 rounded ${
+              darkMode
+                ? "bg-gray-700"
+                : "bg-gray-200"
+            }`}
+          />
 
-  return matchSearch && matchCategory && matchDate;
-});
+          <div
+            className={`h-8 w-48 rounded mt-4 ${
+              darkMode
+                ? "bg-gray-700"
+                : "bg-gray-200"
+            }`}
+          />
+        </div>
+      ))}
+    </div>
+  );
 
-const sortedTransactions = [...filteredTransactions];
+  // =========================
+  // MAIN UI
+  // =========================
 
-switch (sortBy) {
-  case "latest":
-    sortedTransactions.sort(
-      (a, b) => new Date(b.date) - new Date(a.date)
-    );
-    break;
-
-  case "oldest":
-    sortedTransactions.sort(
-      (a, b) => new Date(a.date) - new Date(b.date)
-    );
-    break;
-
-  case "high":
-    sortedTransactions.sort(
-      (a, b) => b.amount - a.amount
-    );
-    break;
-
-  case "low":
-    sortedTransactions.sort(
-      (a, b) => a.amount - b.amount
-    );
-    break;
-
-  case "az":
-    sortedTransactions.sort((a, b) =>
-      a.title.localeCompare(b.title)
-    );
-    break;
-
-  case "za":
-    sortedTransactions.sort((a, b) =>
-      b.title.localeCompare(a.title)
-    );
-    break;
-
-  default:
-    break;
-}
-
-const indexOfLast = currentPage * transactionsPerPage;
-const indexOfFirst = indexOfLast - transactionsPerPage;
-
-const currentTransactions = filteredTransactions.slice(
-  indexOfFirst,
-  indexOfLast
-);
-
-const totalPages = Math.ceil(
-  filteredTransactions.length / transactionsPerPage
-);
-
-if (loading) {
-    return (
-      <div className="flex justify-center items-center h-screen">
-        <h1 className="text-3xl font-bold">Loading...</h1>
-      </div>
-    );
-  }
   return (
-    
-  <div className={`min-h-screen p-8 ${
-    darkMode ? "bg-gray-900 text-white" : "bg-gray-100 text-black"
-  }`}>
+    <div
+      className={`min-h-screen transition-colors duration-300 ${
+        darkMode
+          ? "bg-gray-950 text-white"
+          : "bg-gray-100 text-gray-900"
+      }`}
+    >
+      <div className="max-w-7xl mx-auto p-4 md:p-6 lg:p-8">
 
-    <Navbar handleLogout={handleLogout} />
+        {/* =========================
+            NAVBAR
+        ========================= */}
 
-    <button
-  onClick={() => setDarkMode(!darkMode)}
-  className="bg-indigo-600 text-white px-4 py-2 rounded-lg mb-5"
->
-  {darkMode ? "☀️ Light Mode" : "🌙 Dark Mode"}
-</button>
+        <Navbar handleLogout={handleLogout} />
 
-<button
-  onClick={downloadPDF}
-  className="bg-green-600 text-white px-5 py-2 rounded-lg"
->
-  Download PDF
-</button>
+        {/* =========================
+            TOP ACTION BAR
+        ========================= */}
 
-    <SummaryCards
-      balance={balance}
-      income={income}
-      expense={expense}
-      darkMode={darkMode}
-    />
+        <div className="flex flex-wrap items-center gap-3 mt-6">
 
-    <div className="bg-white p-5 rounded-xl shadow-lg mt-5">
+          <button
+            onClick={() => setDarkMode((prev) => !prev)}
+            className="px-4 py-2 rounded-lg bg-indigo-600 text-white font-medium hover:scale-105 transition-transform shadow-md"
+          >
+            {darkMode
+              ? "☀️ Light Mode"
+              : "🌙 Dark Mode"}
+          </button>
 
-  <h2 className="font-bold text-xl mb-3">
-    Monthly Budget
-  </h2>
+          <button
+            onClick={exportCSV}
+            className="px-4 py-2 rounded-lg bg-emerald-600 text-white font-medium hover:scale-105 transition-transform shadow-md"
+          >
+            📊 Export CSV
+          </button>
 
-  <input
-    type="number"
-    placeholder="Enter Budget"
-    value={budget}
-    onChange={(e) => setBudget(Number(e.target.value))}
-    className="border p-3 rounded-lg w-full"
-  />
+          <button
+            onClick={downloadPDF}
+            className="px-4 py-2 rounded-lg bg-green-600 text-white font-medium hover:scale-105 transition-transform shadow-md"
+          >
+            📄 Download PDF
+          </button>
 
-  <button
-    onClick={() => {
-      localStorage.setItem("budget", budget);
-      alert("Budget Saved");
-    }}
-    className="bg-blue-600 text-white px-5 py-2 rounded mt-3"
-  >
-    Save Budget
-  </button>
+        </div>
 
-   {/* ✅ Progress Bar yaha add karo */}
+        {/* =========================
+            SUMMARY
+        ========================= */}
 
-  {budget > 0 && (
-    <>
-      <div className="w-full bg-gray-300 rounded-full h-4 mt-4">
+        <div className="mt-6 transition-all duration-300">
+          <SummaryCards
+            balance={balance}
+            income={income}
+            expense={expense}
+            darkMode={darkMode}
+          />
+        </div>
+
+        {/* =========================
+            QUICK STATS
+        ========================= */}
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-6">
+
+          <div
+            className={`rounded-xl p-5 shadow-md transition-all duration-300 hover:-translate-y-1 ${
+              darkMode
+                ? "bg-gray-900"
+                : "bg-white"
+            }`}
+          >
+            <p className="text-sm opacity-70">
+              Total Transactions
+            </p>
+
+            <h3 className="text-2xl font-bold mt-2">
+              {totalTransactions}
+            </h3>
+          </div>
+
+          <div
+            className={`rounded-xl p-5 shadow-md transition-all duration-300 hover:-translate-y-1 ${
+              darkMode
+                ? "bg-gray-900"
+                : "bg-white"
+            }`}
+          >
+            <p className="text-sm opacity-70">
+              Average Transaction
+            </p>
+
+            <h3 className="text-2xl font-bold mt-2">
+              ₹
+              {totalTransactions > 0
+                ? Math.round(
+                    (income + expense) /
+                      totalTransactions
+                  )
+                : 0}
+            </h3>
+          </div>
+
+          <div
+            className={`rounded-xl p-5 shadow-md transition-all duration-300 hover:-translate-y-1 ${
+              darkMode
+                ? "bg-gray-900"
+                : "bg-white"
+            }`}
+          >
+            <p className="text-sm opacity-70">
+              Current Balance
+            </p>
+
+            <h3 className="text-2xl font-bold mt-2">
+              ₹{balance}
+            </h3>
+          </div>
+
+        </div>
+
+        {/* =========================
+            BUDGET
+        ========================= */}
 
         <div
-          className="bg-green-600 h-4 rounded-full"
-          style={{
-            width: `${Math.min((expense / budget) * 100, 100)}%`,
-          }}
-        ></div>
+          className={`mt-6 rounded-2xl p-6 shadow-lg ${
+            darkMode
+              ? "bg-gray-900"
+              : "bg-white"
+          }`}
+        >
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+
+            <div>
+              <h2 className="text-xl font-bold">
+                Monthly Budget
+              </h2>
+
+              <p className="text-sm opacity-70 mt-1">
+                Track your spending against your monthly limit.
+              </p>
+            </div>
+
+            {budget > 0 && (
+              <div
+                className={`px-3 py-1 rounded-full text-sm font-semibold ${
+                  budgetExceeded
+                    ? "bg-red-100 text-red-700"
+                    : "bg-green-100 text-green-700"
+                }`}
+              >
+                {budgetExceeded
+                  ? "Over Budget"
+                  : "Within Budget"}
+              </div>
+            )}
+
+          </div>
+
+          <div className="flex flex-col md:flex-row gap-3 mt-5">
+
+            <input
+              type="number"
+              min="0"
+              placeholder="Enter monthly budget"
+              value={budget || ""}
+              onChange={(e) =>
+                setBudget(
+                  Math.max(
+                    Number(e.target.value) || 0,
+                    0
+                  )
+                )
+              }
+              className={`flex-1 border p-3 rounded-lg outline-none focus:ring-2 focus:ring-indigo-500 ${
+                darkMode
+                  ? "bg-gray-800 border-gray-700 text-white"
+                  : "bg-white border-gray-300"
+              }`}
+            />
+
+            <button
+  onClick={saveBudget}
+  disabled={actionLoading}
+  className="px-5 py-3 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 transition disabled:opacity-50"
+>
+  {actionLoading ? "Saving..." : "Save Budget"}
+</button>
+
+          </div>
+
+          {budget > 0 && (
+            <div className="mt-6">
+
+              <div className="flex justify-between text-sm mb-2">
+                <span>
+                  ₹{expense} spent
+                </span>
+
+                <span>
+                  ₹{budget} budget
+                </span>
+              </div>
+
+              <div
+                className={`w-full h-4 rounded-full overflow-hidden ${
+                  darkMode
+                    ? "bg-gray-700"
+                    : "bg-gray-200"
+                }`}
+              >
+                <div
+                  className={`h-full rounded-full transition-all duration-700 ${
+                    budgetExceeded
+                      ? "bg-red-500"
+                      : "bg-green-500"
+                  }`}
+                  style={{
+                    width: `${budgetPercentage}%`,
+                  }}
+                />
+              </div>
+
+              <p className="mt-2 text-sm font-medium">
+                {Math.round(budgetPercentage)}% of budget used
+              </p>
+
+              {budgetExceeded && (
+                <div className="mt-4 rounded-lg border border-red-400 bg-red-50 text-red-700 p-4">
+                  ⚠️ Budget exceeded by{" "}
+                  <strong>
+                    ₹{expense - budget}
+                  </strong>
+                </div>
+              )}
+
+            </div>
+          )}
+        </div>
+
+        {/* =========================
+            CHARTS
+        ========================= */}
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+
+          <div
+            className={`rounded-2xl p-5 shadow-lg transition-all duration-300 hover:-translate-y-1 ${
+              darkMode
+                ? "bg-gray-900"
+                : "bg-white"
+            }`}
+          >
+            <ExpenseChart
+              income={income}
+              expense={expense}
+              darkMode={darkMode}
+            />
+          </div>
+
+          <div
+            className={`rounded-2xl p-5 shadow-lg transition-all duration-300 hover:-translate-y-1 ${
+              darkMode
+                ? "bg-gray-900"
+                : "bg-white"
+            }`}
+          >
+            <MonthlyChart
+              transactions={transactions}
+               darkMode={darkMode}
+            />
+          </div>
+
+        </div>
+
+        {/* =========================
+            SEARCH / FILTER
+        ========================= */}
+
+        <div
+          className={`mt-6 rounded-2xl p-5 shadow-lg ${
+            darkMode
+              ? "bg-gray-900"
+              : "bg-white"
+          }`}
+        >
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+
+            <div>
+              <h2 className="text-xl font-bold">
+                Transactions
+              </h2>
+
+              <p className="text-sm opacity-70">
+                Search, filter and manage your transactions.
+              </p>
+            </div>
+
+            {hasFilters && (
+              <button
+                onClick={clearFilters}
+                className="px-4 py-2 rounded-lg bg-gray-200 text-gray-800 hover:bg-gray-300 transition"
+              >
+                Clear Filters
+              </button>
+            )}
+
+          </div>
+
+          <SearchFilter
+  search={search}
+  setSearch={setSearch}
+  filterCategory={filterCategory}
+  setFilterCategory={setFilterCategory}
+  startDate={startDate}
+  setStartDate={setStartDate}
+  endDate={endDate}
+  setEndDate={setEndDate}
+  sortBy={sortBy}
+  setSortBy={setSortBy}
+/>
+
+
+
+          {/* SORT */}
+
+         
+        </div>
+
+        {/* =========================
+            ADD / EDIT
+        ========================= */}
+
+        <div
+          className={`mt-6 rounded-2xl p-5 shadow-lg ${
+            darkMode
+              ? "bg-gray-900"
+              : "bg-white"
+          }`}
+        >
+          <AddTransaction
+            addTransaction={addTransaction}
+            updateTransaction={updateTransaction}
+            editId={editId}
+            editData={editData}
+            darkMode={darkMode}
+          />
+
+          {actionLoading && (
+            <div className="text-sm text-indigo-500 font-medium mt-3">
+              Saving changes...
+            </div>
+          )}
+        </div>
+
+        {/* =========================
+            TRANSACTIONS
+        ========================= */}
+
+        <div className="mt-6">
+
+          {loading ? (
+            <LoadingSkeleton />
+          ) : currentTransactions.length === 0 ? (
+            <div
+              className={`rounded-2xl p-10 text-center shadow-lg ${
+                darkMode
+                  ? "bg-gray-900"
+                  : "bg-white"
+              }`}
+            >
+              <div className="text-5xl mb-4">
+                💸
+              </div>
+
+              <h3 className="text-xl font-bold">
+                No transactions found
+              </h3>
+
+              <p className="opacity-70 mt-2">
+                Try changing your filters or add your first transaction.
+              </p>
+
+              {hasFilters && (
+                <button
+                  onClick={clearFilters}
+                  className="mt-5 px-5 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700"
+                >
+                  Clear Filters
+                </button>
+              )}
+            </div>
+          ) : (
+            <TransactionList
+              transactions={currentTransactions}
+              deleteTransaction={requestDelete}
+              editTransaction={editTransaction}
+              darkMode={darkMode}
+            />
+          )}
+
+        </div>
+
+        {/* =========================
+            PAGINATION
+        ========================= */}
+
+        {totalPages > 1 && (
+          <div className="flex flex-col sm:flex-row justify-center items-center gap-4 mt-8">
+
+            <button
+              onClick={() =>
+                fetchTransactions(
+                  currentPage - 1
+                )
+              }
+              disabled={
+                currentPage === 1 ||
+                loading
+              }
+              className="px-5 py-2 rounded-lg bg-gray-300 text-gray-800 disabled:opacity-40 hover:bg-gray-400 transition"
+            >
+              ← Previous
+            </button>
+
+            <div className="px-4 py-2 rounded-lg font-semibold">
+              Page {currentPage} of {totalPages}
+            </div>
+
+            <button
+              onClick={() =>
+                fetchTransactions(
+                  currentPage + 1
+                )
+              }
+              disabled={
+                currentPage >= totalPages ||
+                loading
+              }
+              className="px-5 py-2 rounded-lg bg-gray-300 text-gray-800 disabled:opacity-40 hover:bg-gray-400 transition"
+            >
+              Next →
+            </button>
+
+          </div>
+        )}
 
       </div>
 
-      <p className="mt-2 text-sm">
-        {Math.round((expense / budget) * 100)}% of budget used
-      </p>
-    </>
-  )}
+      {/* =========================
+          DELETE MODAL
+      ========================= */}
 
-   {/* Budget Alert */}
+      {deleteId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
 
-  {budget > 0 && expense > budget && (
-  <div className="bg-red-100 border border-red-500 text-red-700 p-4 rounded-lg mt-5">
-    ⚠️ Budget Exceeded by ₹{expense - budget}
-  </div>
-)}
+          <div
+            className={`w-full max-w-md rounded-2xl p-6 shadow-2xl ${
+              darkMode
+                ? "bg-gray-900 text-white"
+                : "bg-white text-gray-900"
+            }`}
+          >
 
-</div>
+            <div className="text-4xl mb-4">
+              🗑️
+            </div>
 
-    <button
-  onClick={exportCSV}
-  className="bg-green-600 text-white px-5 py-2 rounded-lg mt-5"
->
-  Export CSV
-</button>
+            <h2 className="text-2xl font-bold">
+              Delete Transaction?
+            </h2>
 
-    <div className="bg-white mt-8 p-5 rounded-xl shadow-lg">
-      <ExpenseChart
-        income={income}
-        expense={expense}
-        darkMode={darkMode}
-      />
+            <p className="mt-3 opacity-70">
+              Are you sure you want to delete{" "}
+              <strong>{deleteTitle}</strong>?
+              This action cannot be undone.
+            </p>
+
+            <div className="flex justify-end gap-3 mt-6">
+
+              <button
+                onClick={cancelDelete}
+                disabled={actionLoading}
+                className="px-5 py-2 rounded-lg bg-gray-200 text-gray-800 hover:bg-gray-300 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+
+              <button
+                onClick={confirmDelete}
+                disabled={actionLoading}
+                className="px-5 py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+              >
+                {actionLoading
+                  ? "Deleting..."
+                  : "Delete"}
+              </button>
+
+            </div>
+
+          </div>
+        </div>
+      )}
     </div>
-
-    <MonthlyChart transactions={transactions} />
-
-    <SearchFilter
-      search={search}
-      setSearch={setSearch}
-      filterCategory={filterCategory}
-      setFilterCategory={setFilterCategory}
-      startDate={startDate}
-      setStartDate={setStartDate}
-      endDate={endDate}
-      setEndDate={setEndDate}
-    />
-
-    <AddTransaction
-  addTransaction={addTransaction}
-  updateTransaction={updateTransaction}
-  editId={editId}
-  editData={editData}
-  darkMode={darkMode}
-
-/>
-    <TransactionList
-      transactions={currentTransactions}
-      deleteTransaction={deleteTransaction}
-      editTransaction={editTransaction}
-      darkMode={darkMode}
-    />
-
-
-
-    <div className="flex justify-center gap-3 mt-8">
-
-  <button
-    disabled={currentPage === 1}
-    onClick={() => setCurrentPage(currentPage - 1)}
-    className="bg-blue-500 text-white px-4 py-2 rounded disabled:bg-gray-300"
-  >
-    Previous
-  </button>
-
-  <span className="text-xl font-semibold">
-    {currentPage} / {totalPages}
-  </span>
-
-  <button
-    disabled={currentPage === totalPages}
-    onClick={() => setCurrentPage(currentPage + 1)}
-    className="bg-blue-500 text-white px-4 py-2 rounded disabled:bg-gray-300"
-  >
-    Next
-  </button>
-
-</div>
-
-  </div>
-);
-};
+  );
+}
 
 export default Dashboard;
