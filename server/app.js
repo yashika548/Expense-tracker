@@ -13,20 +13,31 @@ const app = express();
 app.use(helmet());
 
 // Production CORS
+const normalizedClientUrl = process.env.CLIENT_URL
+  ?.trim()
+  .replace(/\/$/, "");
+
 const allowedOrigins = [
   "http://localhost:5173",
-  process.env.CLIENT_URL,
+  normalizedClientUrl,
 ].filter(Boolean);
+
+const isAllowedOrigin = (origin) => {
+  if (!origin) return true;
+
+  if (allowedOrigins.includes(origin)) {
+    return true;
+  }
+
+  return /^https:\/\/expense-tracker(?:-[a-z0-9-]+)?-yashika11\.vercel\.app$/i.test(
+    origin
+  );
+};
 
 app.use(
   cors({
     origin: function (origin, callback) {
-      // Allow requests without origin (Postman, mobile apps, etc.)
-      if (!origin) {
-        return callback(null, true);
-      }
-
-      if (allowedOrigins.includes(origin)) {
+      if (isAllowedOrigin(origin)) {
         return callback(null, true);
       }
 
@@ -35,7 +46,6 @@ app.use(
     credentials: true,
   })
 );
-
 // Request body limits
 app.use(express.json({ limit: "10kb" }));
 app.use(express.urlencoded({ extended: true, limit: "10kb" }));
