@@ -1,6 +1,5 @@
 const jwt = require("jsonwebtoken");
-const User = require("../models/User");
-
+const { findUserById } = require("../repositories/userRepository");
 
 const protect = async (req, res, next) => {
   try {
@@ -22,10 +21,13 @@ const protect = async (req, res, next) => {
       });
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(
+      token,
+      process.env.JWT_SECRET
+    );
 
-    // Make sure the user still exists
-    const user = await User.findById(decoded.id).select("_id");
+    // Make sure the PostgreSQL user still exists
+    const user = await findUserById(decoded.id);
 
     if (!user) {
       return res.status(401).json({
@@ -35,10 +37,11 @@ const protect = async (req, res, next) => {
     }
 
     req.user = {
-      id: user._id.toString(),
+      id: user.id,
     };
 
     next();
+
   } catch (error) {
     console.error("Authentication error:", error.message);
 

@@ -61,7 +61,7 @@ function TransactionList({
 
           return (
             <div
-              key={item._id}
+              key={item.id}
               className={`px-5 py-5 border-b last:border-b-0 transition-all duration-200 hover:bg-gray-50 ${
                 darkMode
                   ? "border-gray-800 hover:bg-gray-800/70"
@@ -159,7 +159,7 @@ function TransactionList({
                     <button
                       type="button"
                       onClick={() =>
-                        deleteTransaction(item._id)
+                        deleteTransaction(item.id)
                       }
                       className="px-4 py-2 rounded-lg bg-red-500 text-white font-semibold hover:bg-red-600 hover:-translate-y-0.5 transition-all"
                     >

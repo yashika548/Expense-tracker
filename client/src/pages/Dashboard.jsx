@@ -179,15 +179,15 @@ function Dashboard() {
   // EDIT TRANSACTION
   // =========================
 
-  const editTransaction = (transaction) => {
-    setEditId(transaction._id);
-    setEditData(transaction);
+ const editTransaction = (transaction) => {
+  setEditId(transaction.id);
+  setEditData(transaction);
 
-    window.scrollTo({
-      top: document.body.scrollHeight / 2,
-      behavior: "smooth",
-    });
-  };
+  window.scrollTo({
+    top: document.body.scrollHeight / 2,
+    behavior: "smooth",
+  });
+};
 
   const updateTransaction = async (id, data) => {
     try {
@@ -218,13 +218,13 @@ function Dashboard() {
   // =========================
 
   const requestDelete = (id) => {
-    const transaction = transactions.find(
-      (item) => item._id === id
-    );
+  const transaction = transactions.find(
+    (item) => item.id === id
+  );
 
-    setDeleteId(id);
-    setDeleteTitle(transaction?.title || "this transaction");
-  };
+  setDeleteId(id);
+  setDeleteTitle(transaction?.title || "this transaction");
+};
 
   const cancelDelete = () => {
     setDeleteId(null);

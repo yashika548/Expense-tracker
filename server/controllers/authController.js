@@ -1,7 +1,20 @@
 const bcrypt = require("bcrypt");
-const User = require("../models/User");
+const {
+    findUserByEmail,
+    findUserById,
+    createUser,
+    updateUserOTP,
+    updateUserPassword,
+    markOTPVerified,
+} = require("../repositories/userRepository");
 const otpGenerator = require("otp-generator");
 const transporter = require("../utils/sendEmail");
+
+const {
+  setOTP,
+  getOTP,
+  deleteOTP,
+} = require("../utils/otpCache");
 
 const registerUser = async (req, res) => {
      try {
@@ -16,7 +29,7 @@ const emailNormalized = req.body.email?.trim().toLowerCase();
             });
         }
 
-        const existingUser = await User.findOne({ email: emailNormalized });
+        const existingUser = await findUserByEmail(emailNormalized);
 
         if (existingUser) {
             return res.status(400).json({
@@ -27,17 +40,22 @@ const emailNormalized = req.body.email?.trim().toLowerCase();
 
         const hashedPassword = await bcrypt.hash(password, 10);
 
-        const user = await User.create({
+        const user = await createUser({
             name,
             email: emailNormalized,
             password: hashedPassword
         });
 
+        console.log("POSTGRES REGISTER:", {
+    id: user.id,
+    email: user.email,
+});
+
         res.status(201).json({
             success: true,
             message: "User registered successfully",
             user: {
-                id: user._id,
+                id: user.id,
                 name: user.name,
                 email: user.email
             }
@@ -72,7 +90,7 @@ const { password } = req.body;
         }
 
         // Find user
-        const user = await User.findOne({ email: emailNormalized });
+        const user = await findUserByEmail(emailNormalized);
 
         if (!user) {
             return res.status(400).json({
@@ -94,7 +112,7 @@ const { password } = req.body;
         // Generate JWT
         const token = jwt.sign(
             {
-                id: user._id
+                id: user.id
             },
             process.env.JWT_SECRET,
             {
@@ -107,7 +125,7 @@ const { password } = req.body;
             message: "Login Successful",
             token,
             user: {
-                id: user._id,
+                id: user.id,
                 name: user.name,
                 email: user.email
             }
@@ -128,8 +146,16 @@ const { password } = req.body;
 const getProfile = async (req, res) => {
     try {
 
-        const user = await User.findById(req.user.id).select("-password");
+const user = await findUserById(req.user.id);
 
+if (!user) {
+    return res.status(404).json({
+        success: false,
+        message: "User not found",
+    });
+}
+
+delete user.password;
         res.status(200).json({
             success: true,
             user
@@ -151,7 +177,7 @@ const forgotPassword = async (req, res) => {
     const email = req.body.email?.trim().toLowerCase();
 
     // Check Email
-    const user = await User.findOne({ email });
+    const user = await findUserByEmail(email);
 
     if (!user) {
   return res.status(200).json({
@@ -170,11 +196,14 @@ const forgotPassword = async (req, res) => {
     // Save OTP
     const hashedOTP = await bcrypt.hash(otp, 10);
 
-user.otp = hashedOTP;
-user.otpExpire = Date.now() + 5 * 60 * 1000;
-user.otpVerified = false;
+await setOTP(user.id, hashedOTP);
 
-    await user.save();
+await updateUserOTP(
+    user.id,
+    null,
+    null,
+    false
+);
 
     // Send Email
     await transporter.sendMail({
@@ -204,8 +233,9 @@ const verifyOTP = async (req, res) => {
   try {
     const { email, otp } = req.body;
 
-    const user = await User.findOne({ email: email?.trim().toLowerCase() });
-
+const user = await findUserByEmail(
+    email?.trim().toLowerCase()
+);
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -213,14 +243,16 @@ const verifyOTP = async (req, res) => {
       });
     }
 
-    if (!user.otp) {
+    const storedOTP = await getOTP(user.id);
+
+if (!storedOTP) {
   return res.status(400).json({
     success: false,
-    message: "No active OTP. Please request a new OTP",
+    message: "OTP expired or not found. Please request a new OTP",
   });
 }
 
-    const isOTPValid = await bcrypt.compare(otp, user.otp);
+const isOTPValid = await bcrypt.compare(otp, storedOTP);
 
 if (!isOTPValid) {
   return res.status(400).json({
@@ -229,14 +261,22 @@ if (!isOTPValid) {
   });
 }
 
-    if (user.otpExpire < Date.now()) {
-      return res.status(400).json({
-        success: false,
-        message: "OTP Expired",
-      });
-    }
-    user.otpVerified = true;
-    await user.save(); 
+await deleteOTP(user.id);
+
+await markOTPVerified(user.id);
+
+
+ 
+
+if (!isOTPValid) {
+  return res.status(400).json({
+    success: false,
+    message: "Invalid OTP",
+  });
+}
+
+    
+    await markOTPVerified(user.id); 
 
     res.status(200).json({
       success: true,
@@ -273,9 +313,9 @@ const resetPassword = async (req, res) => {
       });
     }
 
-    const user = await User.findOne({
-      email: email.trim().toLowerCase(),
-    });
+    const user = await findUserByEmail(
+    email.trim().toLowerCase()
+);
 
     if (!user) {
       return res.status(404).json({
@@ -284,28 +324,21 @@ const resetPassword = async (req, res) => {
       });
     }
 
-    if (!user.otpVerified) {
+    if (!user.otp_verified) {
       return res.status(401).json({
         success: false,
         message: "Please verify OTP first",
       });
     }
 
-    if (!user.otpExpire || user.otpExpire < Date.now()) {
-      return res.status(401).json({
-        success: false,
-        message: "OTP expired. Please request a new OTP",
-      });
-    }
+    
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    user.password = hashedPassword;
-    user.otp = null;
-    user.otpExpire = null;
-    user.otpVerified = false;
-
-    await user.save();
+   await updateUserPassword(
+    user.id,
+    hashedPassword
+);
 
     res.status(200).json({
       success: true,

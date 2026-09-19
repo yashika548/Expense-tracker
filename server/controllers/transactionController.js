@@ -1,10 +1,28 @@
 const mongoose = require("mongoose");
 const Transaction = require("../models/Transaction");
+const { publishEvent } = require("../utils/redisPubSub");
+
+const {
+  createTransaction,
+  findTransactions: findTransactionsRepository,
+  deleteTransaction: deleteTransactionRepository,
+  updateTransaction: updateTransactionRepository,
+  getTransactionSummary,
+} = require("../repositories/transactionRepository");
+
+const {
+  getCache,
+  setCache,
+  invalidateUserSummary,
+  invalidateUserTransactions,
+} = require("../utils/cache");
+
 
 
 // ===============================
 // ADD TRANSACTION
 // ===============================
+
 const addTransaction = async (req, res) => {
   try {
     const { title, amount, type, category, note, date } = req.body;
@@ -30,15 +48,32 @@ const addTransaction = async (req, res) => {
       });
     }
 
-    const transaction = await Transaction.create({
-      user: req.user.id,
+    const transaction = await createTransaction({
+      userId: req.user.id,
       title: title.trim(),
       amount: Number(amount),
       type,
       category: category.trim(),
       note: note?.trim() || "",
-      date: date || Date.now(),
+      date: date || new Date(),
     });
+
+  try {
+  await publishEvent("transaction.created", {
+    userId: req.user.id,
+    transactionId: transaction.id,
+    amount: transaction.amount,
+    type: transaction.type,
+  });
+} catch (error) {
+  console.error(
+    "Redis Pub/Sub publish failed:",
+    error.message
+  );
+}
+
+    await invalidateUserSummary(req.user.id);
+    await invalidateUserTransactions(req.user.id);
 
     res.status(201).json({
       success: true,
@@ -57,10 +92,24 @@ const addTransaction = async (req, res) => {
 };
 
 
+
+
+
 // ===============================
 // GET TRANSACTIONS
 // ===============================
+// ===============================
+// GET TRANSACTIONS
+// ===============================
+const { acquireLock, releaseLock } = require("../utils/redisLock");
+
+const sleep = (ms) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
 const getTransactions = async (req, res) => {
+  let lockKey = null;
+  let lockToken = null;
+
   try {
     const page = Math.max(Number(req.query.page) || 1, 1);
     const limit = Math.min(Number(req.query.limit) || 10, 50);
@@ -68,38 +117,148 @@ const getTransactions = async (req, res) => {
 
     const { search, category, type } = req.query;
 
-    const filter = {
-      user: req.user.id,
-    };
+    const cacheKey = [
+      `transactions:user:${req.user.id}`,
+      `page=${page}`,
+      `limit=${limit}`,
+      `search=${search || ""}`,
+      `category=${category || ""}`,
+      `type=${type || ""}`,
+    ].join(":");
 
-    if (search) {
-      filter.$or = [
-        { title: { $regex: search, $options: "i" } },
-        { category: { $regex: search, $options: "i" } },
-        { note: { $regex: search, $options: "i" } },
-      ];
+    // 1. First Redis check
+    const cachedData = await getCache(cacheKey);
+
+    if (cachedData) {
+      console.log("Transactions served from Redis");
+
+      return res.status(200).json({
+        success: true,
+        ...cachedData,
+        source: "redis",
+      });
     }
 
-    if (category && category !== "All") {
-      filter.category = category;
+    console.log("Cache MISS");
+
+    // 2. Try to acquire distributed lock
+    lockKey = `lock:${cacheKey}`;
+
+    try {
+  lockToken = await acquireLock(lockKey, 10);
+} catch (error) {
+  console.error(
+    "Redis lock unavailable:",
+    error.message
+  );
+
+  lockToken = null;
+}
+
+    // ------------------------------------------------
+    // CASE A: We acquired the lock
+    // ------------------------------------------------
+    if (lockToken) {
+      console.log("Redis lock acquired");
+
+      // Double-check cache after acquiring lock
+      const freshCache = await getCache(cacheKey);
+
+      if (freshCache) {
+        console.log(
+          "Cache populated while acquiring lock"
+        );
+
+        return res.status(200).json({
+          success: true,
+          ...freshCache,
+          source: "redis",
+        });
+      }
+
+      // Cache is genuinely missing.
+      console.log(
+        "Lock owner querying PostgreSQL"
+      );
+
+      const { transactions, total } =
+        await findTransactionsRepository({
+          userId: req.user.id,
+          search,
+          category,
+          type,
+          limit,
+          skip,
+        });
+
+      const responseData = {
+        transactions,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+        },
+      };
+
+      // Populate Redis
+      await setCache(cacheKey, responseData, 60);
+
+      console.log(
+        "Cache populated by lock owner"
+      );
+
+      return res.status(200).json({
+        success: true,
+        ...responseData,
+        source: "postgresql",
+      });
     }
 
-    if (type && ["income", "expense"].includes(type)) {
-      filter.type = type;
+    // ------------------------------------------------
+    // CASE B: Another request owns the lock
+    // ------------------------------------------------
+    console.log(
+      "Another request owns the lock - waiting..."
+    );
+
+    // Retry a few times
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      await sleep(100);
+
+      const retryData = await getCache(cacheKey);
+
+      if (retryData) {
+        console.log(
+          `Cache populated after ${attempt} retry(s)`
+        );
+
+        return res.status(200).json({
+          success: true,
+          ...retryData,
+          source: "redis",
+        });
+      }
     }
 
-    const [transactions, total] = await Promise.all([
-      Transaction.find(filter)
-        .sort({ date: -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean(),
+    // ------------------------------------------------
+    // CASE C: Lock owner failed / took too long
+    // ------------------------------------------------
+    console.log(
+      "Cache still unavailable after retries - querying PostgreSQL"
+    );
 
-      Transaction.countDocuments(filter),
-    ]);
+    const { transactions, total } =
+      await findTransactionsRepository({
+        userId: req.user.id,
+        search,
+        category,
+        type,
+        limit,
+        skip,
+      });
 
-    res.status(200).json({
-      success: true,
+    const responseData = {
       transactions,
       pagination: {
         page,
@@ -107,14 +266,38 @@ const getTransactions = async (req, res) => {
         total,
         totalPages: Math.ceil(total / limit),
       },
+    };
+
+    await setCache(cacheKey, responseData, 60);
+
+    return res.status(200).json({
+      success: true,
+      ...responseData,
+      source: "postgresql",
     });
+
   } catch (error) {
     console.error("Get transactions error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Server error",
     });
+
+  } finally {
+    // VERY IMPORTANT:
+    // Only the request that actually acquired the lock
+    // is allowed to release it.
+    if (lockKey && lockToken) {
+      await releaseLock(lockKey, lockToken).catch((error) => {
+        console.error(
+          "Redis lock release error:",
+          error
+        );
+      });
+
+      console.log("Redis lock released");
+    }
   }
 };
 
@@ -122,20 +305,28 @@ const getTransactions = async (req, res) => {
 // ===============================
 // DELETE TRANSACTION
 // ===============================
+// ===============================
+// DELETE TRANSACTION
+// ===============================
 const deleteTransaction = async (req, res) => {
   try {
+    const { id } = req.params;
 
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    // PostgreSQL UUID validation
+    const uuidRegex =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+    if (!uuidRegex.test(id)) {
       return res.status(400).json({
         success: false,
         message: "Invalid transaction ID",
       });
     }
 
-    const transaction = await Transaction.findOne({
-      _id: req.params.id,
-      user: req.user.id,
-    });
+    const transaction = await deleteTransactionRepository(
+      id,
+      req.user.id
+    );
 
     if (!transaction) {
       return res.status(404).json({
@@ -144,15 +335,14 @@ const deleteTransaction = async (req, res) => {
       });
     }
 
-    await transaction.deleteOne();
-
+    await invalidateUserSummary(req.user.id);
+    await invalidateUserTransactions(req.user.id);
     res.status(200).json({
       success: true,
       message: "Transaction Deleted Successfully",
     });
 
   } catch (error) {
-
     console.error("Delete transaction error:", error);
 
     res.status(500).json({
@@ -166,10 +356,18 @@ const deleteTransaction = async (req, res) => {
 // ===============================
 // UPDATE TRANSACTION
 // ===============================
+// ===============================
+// UPDATE TRANSACTION
+// ===============================
 const updateTransaction = async (req, res) => {
   try {
+    const { id } = req.params;
 
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    // PostgreSQL UUID validation
+    const uuidRegex =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+    if (!uuidRegex.test(id)) {
       return res.status(400).json({
         success: false,
         message: "Invalid transaction ID",
@@ -199,26 +397,19 @@ const updateTransaction = async (req, res) => {
       });
     }
 
-    // IMPORTANT:
-    // Ownership is checked during the actual update.
-    const updated = await Transaction.findOneAndUpdate(
-      {
-        _id: req.params.id,
-        user: req.user.id,
-      },
+    const updated = await updateTransactionRepository(
+      id,
+      req.user.id,
       {
         title: title.trim(),
         amount: Number(amount),
         type,
         category: category.trim(),
         note: note?.trim() || "",
-        date,
-      },
-      {
-        new: true,
-        runValidators: true,
+        date: date || new Date(),
       }
     );
+
 
     if (!updated) {
       return res.status(404).json({
@@ -226,6 +417,9 @@ const updateTransaction = async (req, res) => {
         message: "Transaction not found",
       });
     }
+        await invalidateUserSummary(req.user.id);
+    await invalidateUserTransactions(req.user.id);
+
 
     res.status(200).json({
       success: true,
@@ -234,7 +428,6 @@ const updateTransaction = async (req, res) => {
     });
 
   } catch (error) {
-
     console.error("Update transaction error:", error);
 
     res.status(500).json({
@@ -250,54 +443,35 @@ const updateTransaction = async (req, res) => {
 // ===============================
 const getSummary = async (req, res) => {
   try {
-    const result = await Transaction.aggregate([
-      {
-        $match: {
-          user: new mongoose.Types.ObjectId(req.user.id),
-        },
-      },
-      {
-        $group: {
-          _id: "$type",
-          total: {
-            $sum: "$amount",
-          },
-          count: {
-            $sum: 1,
-          },
-        },
-      },
-    ]);
+    const cacheKey = `summary:user:${req.user.id}`;
 
-    let totalIncome = 0;
-    let totalExpense = 0;
-    let totalTransactions = 0;
+    const cachedSummary = await getCache(cacheKey);
 
-    result.forEach((item) => {
-      totalTransactions += item.count;
+    if (cachedSummary) {
+      console.log("Summary served from Redis");
 
-      if (item._id === "income") {
-        totalIncome = item.total;
-      }
+      return res.status(200).json({
+        success: true,
+        ...cachedSummary,
+        source: "redis",
+      });
+    }
 
-      if (item._id === "expense") {
-        totalExpense = item.total;
-      }
-    });
+    console.log("Summary cache miss - querying PostgreSQL");
 
-    const balance = totalIncome - totalExpense;
+    const summary = await getTransactionSummary(req.user.id);
 
-    res.status(200).json({
+    await setCache(cacheKey, summary, 300);
+
+    return res.status(200).json({
       success: true,
-      totalIncome,
-      totalExpense,
-      balance,
-      totalTransactions,
+      ...summary,
+      source: "postgresql",
     });
   } catch (error) {
     console.error("Get summary error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Server error",
     });
