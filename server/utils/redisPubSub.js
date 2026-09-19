@@ -1,12 +1,17 @@
 const { createClient } = require("redis");
 
-const redisPublisher = createClient({
-  socket: {
-    host: process.env.REDIS_HOST || "localhost",
-    port: Number(process.env.REDIS_PORT) || 6379,
-  },
-});
+const redisConfig = process.env.REDIS_URL
+  ? {
+      url: process.env.REDIS_URL,
+    }
+  : {
+      socket: {
+        host: process.env.REDIS_HOST || "localhost",
+        port: Number(process.env.REDIS_PORT) || 6379,
+      },
+    };
 
+const redisPublisher = createClient(redisConfig);
 const redisSubscriber = redisPublisher.duplicate();
 
 redisPublisher.on("error", (error) => {
@@ -34,10 +39,7 @@ async function publishEvent(channel, data) {
     await redisPublisher.connect();
   }
 
-  await redisPublisher.publish(
-    channel,
-    JSON.stringify(data)
-  );
+  await redisPublisher.publish(channel, JSON.stringify(data));
 }
 
 async function subscribeToChannel(channel, handler) {
@@ -50,10 +52,7 @@ async function subscribeToChannel(channel, handler) {
       const data = JSON.parse(message);
       handler(data);
     } catch (error) {
-      console.error(
-        "Redis Pub/Sub message error:",
-        error
-      );
+      console.error("Redis Pub/Sub message error:", error);
     }
   });
 }
