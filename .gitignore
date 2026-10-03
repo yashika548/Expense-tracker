@@ -2,3 +2,7 @@
 .env.*
 !.env.example
 backups/
+# Local PostgreSQL migration dumps
+postgres_data.sql
+postgres_data_neon.sql
+postgres_inserts.sql
